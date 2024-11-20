@@ -1,6 +1,5 @@
 import argparse
-from .controllers.scanner import scan_project, delete_project
-from .controllers.quick_summary import quick_summary
+from .controllers.scanner import quick_summary, scan_project, delete_project
 
 def main():
     parser = argparse.ArgumentParser(

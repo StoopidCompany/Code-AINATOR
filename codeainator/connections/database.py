@@ -2,7 +2,7 @@ import sqlite3
 import os
 import threading
 
-DB_DIR = os.path.join(os.path.expanduser('~'), '.codeainator')
+DB_DIR = os.environ.get('CODEAINATOR_DB_PATH', os.path.join(os.path.expanduser('~'), '.codeainator'))
 DB_PATH = os.path.join(DB_DIR, 'codeainator.db')
 DB_LOCK = threading.Lock()
 

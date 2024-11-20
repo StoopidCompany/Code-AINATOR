@@ -1,13 +1,90 @@
 import os
 import time
 import hashlib
+import json
+import re
+import pathspec
+from ..utils.ProgressAnimation import ProgressAnimation
 from ..connections.database import initialize_database, get_db_connection, DB_LOCK
-from ..config import EXCLUDE_DIRS, PROJECT_MANIFESTS
+from ..connections.openai_client import openai_client
+from ..config import EXCLUDE_DIRS, EXCLUDE_FILES, PROJECT_MANIFESTS, PROMPTS
+
+client = openai_client()
+
+def quick_summary(directory):
+    directory = os.path.abspath(os.path.expanduser(directory))
+
+    # Initialize file list
+    file_list = []
+
+    # Read .gitignore patterns if available
+    gitignore_path = os.path.join(directory, '.gitignore')
+    if os.path.isfile(gitignore_path):
+        with open(gitignore_path, 'r') as gitignore_file:
+            gitignore_patterns = gitignore_file.read().splitlines()
+        # Create a PathSpec object
+        spec = pathspec.PathSpec.from_lines('gitwildmatch', gitignore_patterns)
+    else:
+        spec = None
+
+    for root, dirs, files in os.walk(directory):
+        # Calculate relative paths for directories
+        rel_dir = os.path.relpath(root, directory)
+
+        # Always exclude the .git directory
+        if '.git' in dirs:
+            dirs.remove('.git')
+
+        # Exclude directories and files matching .gitignore patterns
+        if spec:
+            dirs[:] = [d for d in dirs if not spec.match_file(os.path.join(rel_dir, d))]
+            files[:] = [f for f in files if not spec.match_file(os.path.join(rel_dir, f))]
+        else:
+            dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+            files[:] = [f for f in files if f not in EXCLUDE_FILES]
+
+        for file in files:
+            file_path = os.path.join(root, file)
+            relative_path = os.path.relpath(file_path, directory)
+            file_list.append(relative_path)
+
+    # Rest of your existing code...
+    messages = [
+        {
+            "role": "system",
+            "content": PROMPTS['quick_summary']
+        },
+        {
+            "role": "user",
+            "content": f"{file_list}"
+        }
+    ]
+
+    with ProgressAnimation('Analyzing'):
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages
+        )
+
+    summary = completion.choices[0].message.content
+    return summary
 
 def scan_project(directory):
     initialize_database()
     directory = os.path.abspath(os.path.expanduser(directory))
     project_name = os.path.basename(directory)
+
+    print(f"Project '{project_name}' scan started.")
+
+    # Read .gitignore patterns if available
+    gitignore_path = os.path.join(directory, '.gitignore')
+    if os.path.isfile(gitignore_path):
+        with open(gitignore_path, 'r') as gitignore_file:
+            gitignore_patterns = gitignore_file.read().splitlines()
+        # Create a PathSpec object
+        spec = pathspec.PathSpec.from_lines('gitwildmatch', gitignore_patterns)
+    else:
+        spec = None
 
     with DB_LOCK:
         conn = get_db_connection()
@@ -31,13 +108,29 @@ def scan_project(directory):
         files_processed = set()
 
         for root, dirs, files in os.walk(directory):
-            dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+            # Calculate relative paths for directories
+            rel_dir = os.path.relpath(root, directory)
+
+            # Always exclude the .git directory
+            if '.git' in dirs:
+                dirs.remove('.git')
+
+            # Exclude directories and files matching .gitignore patterns
+            if spec:
+                dirs[:] = [d for d in dirs if not spec.match_file(os.path.join(rel_dir, d))]
+                files[:] = [f for f in files if not spec.match_file(os.path.join(rel_dir, f))]
+            else:
+                dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+                files[:] = [f for f in files if f not in EXCLUDE_FILES]
+
             for file in files:
                 file_path = os.path.join(root, file)
                 relative_path = os.path.relpath(file_path, directory)
                 name = file
                 extension = os.path.splitext(name)[1]
                 file_type = 'code' if extension in ('.py', '.js', '.ts') else 'other'
+
+                print(f"Analyzing '{name}'.")
 
                 # Check for project manifest
                 if name in PROJECT_MANIFESTS:
@@ -75,6 +168,32 @@ def scan_project(directory):
                     project_id, product_id, relative_path, name, extension, file_type, last_modified, file_hash
                 ))
                 conn.commit()
+
+                # Get the file ID
+                cursor.execute('SELECT id FROM files WHERE project_id = ? AND relative_path = ?', (project_id, relative_path))
+                file_id = cursor.fetchone()[0]
+
+                # Only analyze code and project_manifest files
+                if file_type in ('code', 'project_manifest'):
+                    if file_type == 'code':
+                        prompt = PROMPTS['code_analysis']
+                    else:
+                        prompt = PROMPTS['project_manifest']
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+
+                        # Analyze file content with retry on JSON decode error
+                        analysis_result = analyze_file_content(content, prompt)
+
+                        # Insert analysis result into database
+                        cursor.execute('''
+                            INSERT INTO file_analysis (file_id, analysis_result, analysis_timestamp)
+                            VALUES (?, ?, ?)
+                        ''', (file_id, analysis_result, time.time()))
+                        conn.commit()
+                    except Exception as e:
+                        print(f"Error analyzing file {relative_path}: {e}")
 
                 files_processed.add(relative_path)
 
@@ -118,3 +237,43 @@ def compute_file_hash(file_path):
                 break
             hasher.update(buf)
     return hasher.hexdigest()
+
+def analyze_file_content(content, prompt, max_retries=2):
+    for attempt in range(max_retries):
+        try:
+            # Prepare messages
+            messages = [
+                {
+                    'role': 'system',
+                    'content': prompt
+                },
+                {
+                    'role': 'user',
+                    'content': content
+                }
+            ]
+
+            # Get analysis result from OpenAI
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages
+            )
+            analysis_result = completion.choices[0].message.content
+
+            # Remove surrounding markdown code block if present
+            analysis_result = re.sub(r"(^```json\s*|^```|```$)", "", analysis_result.strip(), flags=re.MULTILINE)
+
+            # Validate that it's valid JSON
+            analysis_result_json = json.loads(analysis_result)
+            return analysis_result  # Return the valid JSON string if successful
+
+        except json.JSONDecodeError as e:
+            if attempt < max_retries - 1:
+                print("JSON decode error, retrying analysis...")
+                continue  # Retry
+            else:
+                print("Max retries reached. JSON decode error:", e)
+                raise
+        except Exception as e:
+            print("Error during analysis:", e)
+            raise

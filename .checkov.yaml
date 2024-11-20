@@ -1,6 +1,0 @@
-skip-check:
-  - CKV_TF_1
-  - CKV_OPENAPI_3
-  - CKV_OPENAPI_4
-skip-path:
-  - Dockerfile.local

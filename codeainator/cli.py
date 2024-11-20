@@ -1,10 +1,13 @@
+# cli.py
+
 import argparse
 from .controllers.scanner import quick_summary, scan_project, delete_project
+from .controllers.generator import generate_file
 
 def main():
     parser = argparse.ArgumentParser(
         prog='codeainator',
-        description='Codeainator CLI Tool - Process code directories.'
+        description='Code-AINATOR CLI Tool - Process code directories.'
     )
     parser.add_argument(
         '-d', '--dir', '--directory',
@@ -29,9 +32,27 @@ def main():
         '-o', '--output',
         help='Output file to save the result'
     )
+    parser.add_argument(
+        '-g', '--generate',
+        action='store_true',
+        help='Generate a file'
+    )
+    parser.add_argument(
+        '-t', '--template',
+        help='Path to a template file'
+    )
     args = parser.parse_args()
-
-    if args.dir:
+    
+    if args.generate:
+        if not args.dir:
+            parser.error("Argument '-d/--dir' is required when using '-g/--generate'.")
+        output = generate_file(args.dir, args.template)
+        if args.output:
+            with open(args.output, 'w') as f:
+                f.write(output)
+        else:
+            print(output)
+    elif args.dir:
         if args.remove:
             delete_project(args.dir)
         elif args.analyze:

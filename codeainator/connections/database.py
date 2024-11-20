@@ -22,6 +22,7 @@ def initialize_database():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 path TEXT UNIQUE,
                 name TEXT,
+                summary TEXT,
                 last_scanned REAL
             )
         ''')
@@ -33,6 +34,7 @@ def initialize_database():
                 project_id INTEGER,
                 name TEXT,
                 type TEXT,
+                summary TEXT,
                 manifest_path TEXT,
                 FOREIGN KEY(project_id) REFERENCES projects(id)
             )
